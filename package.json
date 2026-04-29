@@ -1,0 +1,29 @@
+{
+  "name": "ghq-commits",
+  "version": "0.1.0",
+  "description": "Queue recently changed GitHub repository files by latest commit blob.",
+  "type": "module",
+  "bin": {
+    "ghq-commits": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
