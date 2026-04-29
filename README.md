@@ -7,8 +7,8 @@
 ## Command summary
 
 ```text
-ghq-commits sync --repo owner/name [--clone-dir ./.ghq-commits/repos] [--clone-url url] [--repo-path /path/to/repo] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .js,.jsx,.ts,.tsx] [--base sha] [--no-bootstrap-current] [--db path]
-ghq-commits watch --repo owner/name [--clone-dir ./.ghq-commits/repos] [--repo-path /path/to/repo] [--interval 60s] [--only .js,.jsx,.ts,.tsx] [--no-bootstrap-current] [--db path]
+ghq-commits sync --repo owner/name [--clone-dir ./.ghq-commits/repos] [--clone-url url] [--repo-path /path/to/repo] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .js,.jsx,.ts,.tsx] [--base sha] [--db path]
+ghq-commits watch --repo owner/name [--clone-dir ./.ghq-commits/repos] [--repo-path /path/to/repo] [--interval 60s] [--only .js,.jsx,.ts,.tsx] [--db path]
 ghq-commits next [--db path] [--worker id] [--lease 90m]
 ghq-commits ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]
 ghq-commits fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]
@@ -73,8 +73,6 @@ A leased file remains `delivered` until `ack`, `fail`, or lease expiry.
 ## First run behavior
 
 If no checkpoint exists, `sync` bootstraps the queue with every current file at the fetched head that passes `--only` and skip filters. It then saves the checkpoint to the fetched head, so future runs become incremental.
-
-To skip the initial full-current-file bootstrap, pass `--no-bootstrap-current`.
 
 To backfill a specific range intentionally, pass `--base <sha>`.
 

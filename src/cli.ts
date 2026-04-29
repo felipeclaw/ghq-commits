@@ -78,10 +78,6 @@ function asString(value: unknown, fallback?: string): string | undefined {
   return String(value);
 }
 
-function hasFlag(args: Args, name: string): boolean {
-  return args[name] === true || args[name] === "true";
-}
-
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -345,7 +341,7 @@ async function sync(args: Args): Promise<void> {
 
   const head = await gitRequired(repoPath, ["rev-parse", "--verify", ref]);
   const storedHead = asString(args.base) ?? getState(db, stateKey);
-  const shouldBootstrapCurrent = !storedHead && !asString(args.base) && !hasFlag(args, "no-bootstrap-current");
+  const shouldBootstrapCurrent = !storedHead && !asString(args.base);
   let base = storedHead || beforeFetchHead || head;
   if (!await git(repoPath, ["rev-parse", "--verify", base], true)) base = head;
 
@@ -513,7 +509,7 @@ function stats(args: Args): void {
 }
 
 function usage(): void {
-  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  sync --repo owner/name [--clone-dir ./.ghq-commits/repos] [--clone-url url] [--repo-path /path/to/repo] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .ts,.tsx] [--base sha] [--no-bootstrap-current] [--db path]\n  watch --repo owner/name [--clone-dir ./.ghq-commits/repos] [--repo-path /path/to/repo] [--interval 60s] [--only .ts,.tsx] [--no-bootstrap-current] [--db path]\n  next [--db path] [--worker id] [--lease 90m]\n  ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]\n  fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]\n  stats [--db path]`);
+  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  sync --repo owner/name [--clone-dir ./.ghq-commits/repos] [--clone-url url] [--repo-path /path/to/repo] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .ts,.tsx] [--base sha] [--db path]\n  watch --repo owner/name [--clone-dir ./.ghq-commits/repos] [--repo-path /path/to/repo] [--interval 60s] [--only .ts,.tsx] [--db path]\n  next [--db path] [--worker id] [--lease 90m]\n  ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]\n  fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]\n  stats [--db path]`);
 }
 
 async function main(): Promise<void> {
