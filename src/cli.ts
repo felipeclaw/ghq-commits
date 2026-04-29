@@ -98,8 +98,16 @@ function splitCsv(value: string | undefined): string[] {
   return (value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+function normalizeSuffix(suffix: string): string {
+  return suffix.startsWith(".") ? suffix.toLowerCase() : `.${suffix.toLowerCase()}`;
+}
+
 function allowedExts(args: Args): Set<string> {
-  return new Set(splitCsv(str(args.only)).map((ext) => ext.startsWith(".") ? ext.toLowerCase() : `.${ext.toLowerCase()}`));
+  return new Set(splitCsv(str(args.only)).map(normalizeSuffix));
+}
+
+function ignoredSuffixes(args: Args): string[] {
+  return splitCsv(str(args.ignore)).map(normalizeSuffix);
 }
 
 function fileExt(path: string): string {
@@ -108,8 +116,10 @@ function fileExt(path: string): string {
   return idx > 0 ? name.slice(idx).toLowerCase() : "";
 }
 
-function shouldQueue(path: string, exts: Set<string>): boolean {
+function shouldQueue(path: string, exts: Set<string>, ignored: string[]): boolean {
+  const lower = path.toLowerCase();
   if (path.split("/").some((part) => SKIP_DIRS.has(part))) return false;
+  if (ignored.some((suffix) => lower.endsWith(suffix))) return false;
   return exts.size === 0 || exts.has(fileExt(path));
 }
 
@@ -250,10 +260,11 @@ function upsertFile(database: Database.Database, input: FileInput): "inserted" |
 async function sync(args: Args): Promise<void> {
   const repo = required(args, "repo");
   const exts = allowedExts(args);
+  const ignored = ignoredSuffixes(args);
   const database = db(args);
   const path = await cloneIfNeeded(repo);
   const { before, head } = await fetchHead(path);
-  const stateKey = `head:${repo}:${[...exts].sort().join(",") || "*"}`;
+  const stateKey = `head:${repo}:${[...exts].sort().join(",") || "*"}:ignore:${ignored.sort().join(",") || "*"}`;
   const checkpoint = getState(database, stateKey);
   const bootstrap = !checkpoint;
   const base = checkpoint || before || head;
@@ -264,7 +275,7 @@ async function sync(args: Args): Promise<void> {
   let unchanged = 0;
   let skipped = 0;
   for (const file of candidates) {
-    if (!shouldQueue(file, exts)) {
+    if (!shouldQueue(file, exts, ignored)) {
       skipped++;
       continue;
     }
@@ -376,7 +387,7 @@ function stats(args: Args): void {
 }
 
 function usage(): void {
-  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  watch --repo owner/name [--only .ts,.tsx] [--db path] [--interval 60s]\n  sync --repo owner/name [--only .ts,.tsx] [--db path]\n  next [--db path] [--worker id] [--lease 70m]\n  ack --id n [--db path] [--issue-number n] [--issue-url url] [--severity p0]\n  fail --id n [--db path] [--reason text]\n  stats [--db path]`);
+  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  watch --repo owner/name [--only .ts,.tsx] [--ignore .test.ts,.spec.ts,.d.ts] [--db path] [--interval 60s]\n  sync --repo owner/name [--only .ts,.tsx] [--ignore .test.ts,.spec.ts,.d.ts] [--db path]\n  next [--db path] [--worker id] [--lease 70m]\n  ack --id n [--db path] [--issue-number n] [--issue-url url] [--severity p0]\n  fail --id n [--db path] [--reason text]\n  stats [--db path]`);
 }
 
 async function main(): Promise<void> {

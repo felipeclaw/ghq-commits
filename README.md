@@ -8,10 +8,10 @@ It clones the repo into a gitignored managed folder, bootstraps all current matc
 
 ```bash
 # Keep syncing changed files every minute.
-ghq-commits watch --repo owner/repo --only .js,.jsx,.ts,.tsx --db queue.db --interval 60s
+ghq-commits watch --repo owner/repo --only .js,.jsx,.ts,.tsx --ignore .test.ts,.spec.ts,.d.ts --db queue.db --interval 60s
 
 # Run one sync now.
-ghq-commits sync --repo owner/repo --only .js,.jsx,.ts,.tsx --db queue.db
+ghq-commits sync --repo owner/repo --only .js,.jsx,.ts,.tsx --ignore .test.ts,.spec.ts,.d.ts --db queue.db
 
 # Lease one file for a reviewer.
 ghq-commits next --db queue.db --worker reviewer-1 --lease 70m
@@ -37,6 +37,7 @@ ghq-commits stats --db queue.db
 - First sync without a checkpoint queues every current file matching `--only`.
 - Later syncs run `git fetch --prune origin main` and compare checkpoint → latest `origin/main`.
 - Skips heavy/generated folders: `.git`, `node_modules`, `dist`, `build`, `coverage`, `.next`, `.turbo`, `.cache`.
+- `--ignore` is a comma-separated suffix list applied after `--only`; for example `.test.ts,.spec.ts,.d.ts`.
 - Upserts by `(repo, path)` so stale intermediate commits do not pile up.
 - If a leased file changes before `ack`, it is marked dirty and `ack` puts it back to pending.
 
