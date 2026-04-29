@@ -78,6 +78,10 @@ function asString(value: unknown, fallback?: string): string | undefined {
   return String(value);
 }
 
+function hasFlag(args: Args, name: string): boolean {
+  return args[name] === true || args[name] === "true";
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -285,6 +289,11 @@ async function fileLastCommit(repoPath: string, ref: string, path: string): Prom
   return { sha, at: at || nowIso() };
 }
 
+async function currentFiles(repoPath: string, ref: string): Promise<GitChangedFile[]> {
+  const output = await git(repoPath, ["ls-tree", "-r", "-z", "--name-only", ref]);
+  return output.split("\0").filter(Boolean).map((path) => ({ status: "current", path }));
+}
+
 function enqueueFile(db: Database.Database, input: EnqueueInput): "inserted" | "updated" | "unchanged" {
   const ts = nowIso();
   const existing = db.prepare("SELECT blob_sha, status FROM files WHERE repo=? AND path=?").get(input.repo, input.path) as { blob_sha: string; status: string } | undefined;
@@ -336,16 +345,18 @@ async function sync(args: Args): Promise<void> {
 
   const head = await gitRequired(repoPath, ["rev-parse", "--verify", ref]);
   const storedHead = asString(args.base) ?? getState(db, stateKey);
+  const shouldBootstrapCurrent = !storedHead && !asString(args.base) && !hasFlag(args, "no-bootstrap-current");
   let base = storedHead || beforeFetchHead || head;
   if (!await git(repoPath, ["rev-parse", "--verify", base], true)) base = head;
 
-  if (base === head) {
+  if (base === head && !shouldBootstrapCurrent) {
     setState(db, stateKey, head);
-    console.log(JSON.stringify({ repo, repoPath, ref, base, head, changedFiles: 0, inserted: 0, updated: 0, unchanged: 0, skipped: 0, checkpoint: head }, null, 2));
+    console.log(JSON.stringify({ repo, repoPath, ref, mode: "incremental", base, head, changedFiles: 0, inserted: 0, updated: 0, unchanged: 0, skipped: 0, checkpoint: head }, null, 2));
     return;
   }
 
-  const files = await changedFiles(repoPath, base, head);
+  const mode = shouldBootstrapCurrent ? "bootstrap-current" : "incremental";
+  const files = shouldBootstrapCurrent ? await currentFiles(repoPath, head) : await changedFiles(repoPath, base, head);
   let inserted = 0;
   let updated = 0;
   let unchanged = 0;
@@ -369,7 +380,7 @@ async function sync(args: Args): Promise<void> {
   }
 
   setState(db, stateKey, head);
-  console.log(JSON.stringify({ repo, repoPath, ref, base, head, changedFiles: files.length, inserted, updated, unchanged, skipped, checkpoint: head }, null, 2));
+  console.log(JSON.stringify({ repo, repoPath, ref, mode, base, head, changedFiles: files.length, inserted, updated, unchanged, skipped, checkpoint: head }, null, 2));
 }
 
 async function watch(args: Args): Promise<void> {
@@ -502,7 +513,7 @@ function stats(args: Args): void {
 }
 
 function usage(): void {
-  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  sync --repo owner/name [--clone-dir ./.ghq-commits/repos] [--clone-url url] [--repo-path /path/to/repo] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .ts,.tsx] [--base sha] [--db path]\n  watch --repo owner/name [--clone-dir ./.ghq-commits/repos] [--repo-path /path/to/repo] [--interval 60s] [--only .ts,.tsx] [--db path]\n  next [--db path] [--worker id] [--lease 90m]\n  ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]\n  fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]\n  stats [--db path]`);
+  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  sync --repo owner/name [--clone-dir ./.ghq-commits/repos] [--clone-url url] [--repo-path /path/to/repo] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .ts,.tsx] [--base sha] [--no-bootstrap-current] [--db path]\n  watch --repo owner/name [--clone-dir ./.ghq-commits/repos] [--repo-path /path/to/repo] [--interval 60s] [--only .ts,.tsx] [--no-bootstrap-current] [--db path]\n  next [--db path] [--worker id] [--lease 90m]\n  ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]\n  fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]\n  stats [--db path]`);
 }
 
 async function main(): Promise<void> {
