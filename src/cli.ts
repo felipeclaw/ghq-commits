@@ -2,13 +2,16 @@
 import Database from "better-sqlite3";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_DB = "./ghq-commits.db";
 const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_LEASE_MS = 90 * 60 * 1000;
 const DEFAULT_MAX_ATTEMPTS = 5;
+const DEFAULT_CLONE_DIR = "./.ghq-commits/repos";
 
 const SKIP_PATH_PARTS = new Set([".git", "node_modules", "dist", "build", "coverage", ".next", ".turbo", ".cache"]);
 
@@ -183,7 +186,7 @@ function setState(db: Database.Database, key: string, value: string): void {
     .run(key, value, nowIso());
 }
 
-async function git(cwd: string, args: string[], allowFailure = false): Promise<string> {
+async function execGit(cwd: string | undefined, args: string[], allowFailure = false): Promise<string> {
   try {
     const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 100 * 1024 * 1024 });
     return stdout.trimEnd();
@@ -191,6 +194,10 @@ async function git(cwd: string, args: string[], allowFailure = false): Promise<s
     if (allowFailure) return "";
     throw error;
   }
+}
+
+async function git(cwd: string, args: string[], allowFailure = false): Promise<string> {
+  return execGit(cwd, args, allowFailure);
 }
 
 async function gitRequired(cwd: string, args: string[]): Promise<string> {
@@ -216,6 +223,32 @@ async function repoName(args: Args, repoPath: string, remote: string): Promise<s
   const parsed = parseRepoFromRemote(url);
   if (!parsed) throw new Error(`Could not derive owner/repo from remote URL: ${url}. Pass --repo owner/name.`);
   return parsed;
+}
+
+function repoSlug(repo: string): string {
+  return repo.replace(/[^A-Za-z0-9._-]+/g, "__");
+}
+
+function repoCloneUrl(args: Args, repo: string): string {
+  const explicit = asString(args["clone-url"]);
+  if (explicit) return explicit;
+  return `git@github.com:${repo}.git`;
+}
+
+async function managedRepoPath(args: Args): Promise<string> {
+  const explicitPath = asString(args["repo-path"]);
+  if (explicitPath) return resolve(explicitPath);
+
+  const repo = asString(args.repo);
+  if (!repo) throw new Error("sync/watch requires --repo owner/name when --repo-path is omitted");
+
+  const cloneRoot = resolve(asString(args["clone-dir"], DEFAULT_CLONE_DIR)!);
+  const repoPath = resolve(cloneRoot, repoSlug(repo));
+  if (existsSync(resolve(repoPath, ".git"))) return repoPath;
+
+  await mkdir(dirname(repoPath), { recursive: true });
+  await execGit(undefined, ["clone", repoCloneUrl(args, repo), repoPath]);
+  return repoPath;
 }
 
 function parseNameStatusZ(output: string): GitChangedFile[] {
@@ -289,7 +322,7 @@ function enqueueFile(db: Database.Database, input: EnqueueInput): "inserted" | "
 }
 
 async function sync(args: Args): Promise<void> {
-  const repoPath = resolve(asString(args["repo-path"], ".")!);
+  const repoPath = await managedRepoPath(args);
   const remote = asString(args.remote, "origin")!;
   const branch = asString(args.branch, "main")!;
   const ref = asString(args.ref, `refs/remotes/${remote}/${branch}`)!;
@@ -344,7 +377,7 @@ async function watch(args: Args): Promise<void> {
   let stopping = false;
   process.on("SIGINT", () => { stopping = true; });
   process.on("SIGTERM", () => { stopping = true; });
-  console.log(JSON.stringify({ watching: true, intervalMs, repoPath: resolve(asString(args["repo-path"], ".")!), repo: asString(args.repo) ?? null, only: [...onlyExts(args)], db: asString(args.db, DEFAULT_DB) }));
+  console.log(JSON.stringify({ watching: true, intervalMs, repoPath: asString(args["repo-path"]) ? resolve(asString(args["repo-path"])!) : null, cloneDir: resolve(asString(args["clone-dir"], DEFAULT_CLONE_DIR)!), repo: asString(args.repo) ?? null, only: [...onlyExts(args)], db: asString(args.db, DEFAULT_DB) }));
   while (!stopping) {
     try {
       await sync(args);
@@ -469,7 +502,7 @@ function stats(args: Args): void {
 }
 
 function usage(): void {
-  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  sync --repo-path /path/to/repo [--repo owner/name] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .ts,.tsx] [--base sha] [--db path]\n  watch --repo-path /path/to/repo [--repo owner/name] [--interval 60s] [--only .ts,.tsx] [--db path]\n  next [--db path] [--worker id] [--lease 90m]\n  ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]\n  fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]\n  stats [--db path]`);
+  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  sync --repo owner/name [--clone-dir ./.ghq-commits/repos] [--clone-url url] [--repo-path /path/to/repo] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .ts,.tsx] [--base sha] [--db path]\n  watch --repo owner/name [--clone-dir ./.ghq-commits/repos] [--repo-path /path/to/repo] [--interval 60s] [--only .ts,.tsx] [--db path]\n  next [--db path] [--worker id] [--lease 90m]\n  ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]\n  fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]\n  stats [--db path]`);
 }
 
 async function main(): Promise<void> {

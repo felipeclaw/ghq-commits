@@ -1,14 +1,14 @@
 # ghq-commits
 
-`ghq-commits` is a small GitHub Queue tool for tracking recently changed files from a local git checkout and feeding file-level review workers.
+`ghq-commits` is a small GitHub Queue tool for tracking recently changed files from a managed local git clone and feeding file-level review workers.
 
 “ghq” means “GitHub queue”. This package enqueues the latest version of each changed file, deduped by `repo + path`, so workers review only the current blob instead of stale intermediate commits.
 
 ## Command summary
 
 ```text
-ghq-commits sync --repo-path /path/to/repo [--repo owner/name] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .js,.jsx,.ts,.tsx] [--base sha] [--db path]
-ghq-commits watch --repo-path /path/to/repo [--repo owner/name] [--interval 60s] [--only .js,.jsx,.ts,.tsx] [--db path]
+ghq-commits sync --repo owner/name [--clone-dir ./.ghq-commits/repos] [--clone-url url] [--repo-path /path/to/repo] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .js,.jsx,.ts,.tsx] [--base sha] [--db path]
+ghq-commits watch --repo owner/name [--clone-dir ./.ghq-commits/repos] [--repo-path /path/to/repo] [--interval 60s] [--only .js,.jsx,.ts,.tsx] [--db path]
 ghq-commits next [--db path] [--worker id] [--lease 90m]
 ghq-commits ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]
 ghq-commits fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]
@@ -21,7 +21,7 @@ ghq-commits stats [--db path]
 
 1. Run `sync` periodically or run one long-lived watcher:
    ```bash
-   ghq-commits watch --repo-path /srv/repos/project --repo owner/repo --only .js,.jsx,.ts,.tsx --db /var/lib/ghq-commits/queue.db --interval 60s
+   ghq-commits watch --repo owner/repo --only .js,.jsx,.ts,.tsx --db /var/lib/ghq-commits/queue.db --interval 60s
    ```
 2. Each review worker leases one file:
    ```bash
@@ -46,6 +46,8 @@ A leased file remains `delivered` until `ack`, `fail`, or lease expiry.
 ## How it works
 
 - `sync` uses local git only; no REST API calls are part of this flow.
+- If `--repo-path` is omitted, `sync`/`watch` clones `--repo owner/name` into `./.ghq-commits/repos/owner__name`, a gitignored managed clone directory.
+- Override the managed clone location with `--clone-dir`, or the clone remote with `--clone-url`.
 - Each sync captures the current local `refs/remotes/origin/main`, runs `git fetch --prune origin main`, then compares the previous checkpoint to the new head.
 - Changed files come from:
   ```bash
@@ -112,7 +114,7 @@ Requirements:
 
 - Node 20+
 - `git`
-- a local checkout with a configured remote
+- SSH/HTTPS access to clone the target repo, unless `--repo-path` points at an existing checkout
 
 ## Development
 
