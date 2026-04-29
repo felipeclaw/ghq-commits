@@ -9,15 +9,10 @@ const DEFAULT_DB = "./ghq-commits.db";
 const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_LEASE_MS = 90 * 60 * 1000;
 const DEFAULT_MAX_ATTEMPTS = 5;
-const DEFAULT_LOOKBACK = "24h";
-const SAFETY_WINDOW_MS = 10 * 60 * 1000;
 
 const SKIP_PATH_PARTS = new Set([".git", "node_modules", "dist", "build", "coverage", ".next", ".turbo", ".cache"]);
 
 type Args = { _: string[]; [key: string]: string | boolean | string[] };
-type CommitListItem = { sha: string; commit?: { author?: { date?: string }; committer?: { date?: string } } };
-type CommitFile = { filename: string; status?: string; sha?: string | null; blob_url?: string; raw_url?: string; previous_filename?: string };
-type CommitDetails = { sha: string; commit?: { author?: { date?: string }; committer?: { date?: string } }; files?: CommitFile[] };
 type ItemRow = {
   id: number;
   repo: string;
@@ -50,6 +45,11 @@ type EnqueueInput = {
   commitAt: string;
 };
 
+type GitChangedFile = {
+  path: string;
+  status: string;
+};
+
 function parseArgs(argv: string[]): Args {
   const args: Args = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -75,20 +75,12 @@ function asString(value: unknown, fallback?: string): string | undefined {
   return String(value);
 }
 
-function hasFlag(args: Args, name: string): boolean {
-  return args[name] === true || args[name] === "true";
-}
-
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 function addMsIso(ms: number): string {
   return new Date(Date.now() + ms).toISOString();
-}
-
-function toIso(value: string | Date): string {
-  return new Date(value).toISOString();
 }
 
 function parseDurationMs(value: string | undefined, fallbackMs: number): number {
@@ -113,10 +105,6 @@ function listArg(args: Args, name: string): string[] {
   const raw = args[name];
   const values = Array.isArray(raw) ? raw : raw ? [String(raw)] : [];
   return values.flatMap((v) => v.split(",").map((s) => s.trim()).filter(Boolean));
-}
-
-function repoList(args: Args): string[] {
-  return listArg(args, "repo");
 }
 
 function normalizeExt(ext: string): string {
@@ -195,31 +183,73 @@ function setState(db: Database.Database, key: string, value: string): void {
     .run(key, value, nowIso());
 }
 
-async function ghJson<T>(ghArgs: string[]): Promise<T> {
-  const { stdout } = await execFileAsync("gh", ["api", ...ghArgs], { maxBuffer: 100 * 1024 * 1024 });
-  return JSON.parse(stdout) as T;
-}
-
-async function listCommits(repo: string, since: string): Promise<CommitListItem[]> {
-  return ghJson<CommitListItem[]>(["--method", "GET", `repos/${repo}/commits`, "-F", "per_page=100", "-F", `since=${since}`, "--paginate"]);
-}
-
-async function commitDetails(repo: string, sha: string): Promise<CommitDetails> {
-  return ghJson<CommitDetails>(["--method", "GET", `repos/${repo}/commits/${sha}`]);
-}
-
-async function currentBlobSha(repo: string, path: string, ref: string): Promise<string | null> {
+async function git(cwd: string, args: string[], allowFailure = false): Promise<string> {
   try {
-    const data = await ghJson<{ sha?: string; type?: string }>(["--method", "GET", `repos/${repo}/contents/${path}`, "-F", `ref=${ref}`]);
-    return data.type === "file" && data.sha ? data.sha : null;
+    const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 100 * 1024 * 1024 });
+    return stdout.trimEnd();
   } catch (error) {
-    if (error instanceof Error && error.message.includes("Not Found")) return null;
-    return null;
+    if (allowFailure) return "";
+    throw error;
   }
 }
 
-function commitDate(commit: CommitDetails | CommitListItem): string {
-  return commit.commit?.committer?.date ?? commit.commit?.author?.date ?? nowIso();
+async function gitRequired(cwd: string, args: string[]): Promise<string> {
+  const out = await git(cwd, args);
+  if (!out) throw new Error(`git ${args.join(" ")} returned empty output`);
+  return out;
+}
+
+function parseRepoFromRemote(url: string): string | null {
+  const trimmed = url.trim().replace(/\.git$/, "");
+  let match = trimmed.match(/^git@github\.com:([^/]+\/[^/]+)$/);
+  if (match) return match[1];
+  match = trimmed.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)$/);
+  if (match) return match[1];
+  match = trimmed.match(/^ssh:\/\/git@github\.com\/([^/]+\/[^/]+)$/);
+  return match ? match[1] : null;
+}
+
+async function repoName(args: Args, repoPath: string, remote: string): Promise<string> {
+  const explicit = asString(args.repo);
+  if (explicit) return explicit;
+  const url = await gitRequired(repoPath, ["remote", "get-url", remote]);
+  const parsed = parseRepoFromRemote(url);
+  if (!parsed) throw new Error(`Could not derive owner/repo from remote URL: ${url}. Pass --repo owner/name.`);
+  return parsed;
+}
+
+function parseNameStatusZ(output: string): GitChangedFile[] {
+  const parts = output.split("\0").filter(Boolean);
+  const files: GitChangedFile[] = [];
+  for (let i = 0; i < parts.length;) {
+    const status = parts[i++];
+    const code = status[0];
+    if (code === "R" || code === "C") {
+      i++; // old path
+      const newPath = parts[i++];
+      if (newPath) files.push({ status, path: newPath });
+    } else {
+      const path = parts[i++];
+      if (path) files.push({ status, path });
+    }
+  }
+  return files;
+}
+
+async function changedFiles(repoPath: string, base: string, head: string): Promise<GitChangedFile[]> {
+  const output = await git(repoPath, ["diff", "--name-status", "-z", "--diff-filter=ACMR", "-M", `${base}..${head}`]);
+  return parseNameStatusZ(output);
+}
+
+async function blobSha(repoPath: string, ref: string, path: string): Promise<string | null> {
+  const out = await git(repoPath, ["rev-parse", `${ref}:${path}`], true);
+  return out || null;
+}
+
+async function fileLastCommit(repoPath: string, ref: string, path: string): Promise<{ sha: string; at: string }> {
+  const out = await gitRequired(repoPath, ["log", "-1", "--format=%H%x00%cI", ref, "--", path]);
+  const [sha, at] = out.split("\0");
+  return { sha, at: at || nowIso() };
 }
 
 function enqueueFile(db: Database.Database, input: EnqueueInput): "inserted" | "updated" | "unchanged" {
@@ -227,13 +257,13 @@ function enqueueFile(db: Database.Database, input: EnqueueInput): "inserted" | "
   const existing = db.prepare("SELECT blob_sha, status FROM files WHERE repo=? AND path=?").get(input.repo, input.path) as { blob_sha: string; status: string } | undefined;
   if (!existing) {
     db.prepare(`INSERT INTO files(repo, path, blob_sha, status, dirty, attempts, first_seen_commit, last_seen_commit, last_seen_commit_at, last_seen_at, created_at, updated_at)
-      VALUES (?, ?, ?, 'pending', 0, 0, ?, ?, ?, ?, ?, ?)`) 
+      VALUES (?, ?, ?, 'pending', 0, 0, ?, ?, ?, ?, ?, ?)`)
       .run(input.repo, input.path, input.blobSha, input.commitSha, input.commitSha, input.commitAt, ts, ts, ts);
     return "inserted";
   }
 
   if (existing.blob_sha === input.blobSha) {
-    db.prepare(`UPDATE files SET last_seen_commit=?, last_seen_commit_at=?, last_seen_at=?, updated_at=? WHERE repo=? AND path=?`)
+    db.prepare("UPDATE files SET last_seen_commit=?, last_seen_commit_at=?, last_seen_at=?, updated_at=? WHERE repo=? AND path=?")
       .run(input.commitSha, input.commitAt, ts, ts, input.repo, input.path);
     return "unchanged";
   }
@@ -258,59 +288,55 @@ function enqueueFile(db: Database.Database, input: EnqueueInput): "inserted" | "
   return "updated";
 }
 
-async function syncRepo(db: Database.Database, repo: string, allowedExts: Set<string>, since: string, ref: string): Promise<{ repo: string; since: string; commits: number; seenFiles: number; inserted: number; updated: number; unchanged: number; skipped: number; checkpoint: string }> {
-  const commits = await listCommits(repo, since);
-  commits.sort((a, b) => commitDate(a).localeCompare(commitDate(b)) || a.sha.localeCompare(b.sha));
-  let seenFiles = 0;
+async function sync(args: Args): Promise<void> {
+  const repoPath = resolve(asString(args["repo-path"], ".")!);
+  const remote = asString(args.remote, "origin")!;
+  const branch = asString(args.branch, "main")!;
+  const ref = asString(args.ref, `refs/remotes/${remote}/${branch}`)!;
+  const allowedExts = onlyExts(args);
+  const db = openDb(args);
+  const repo = await repoName(args, repoPath, remote);
+  const stateKey = `lastHead:${repo}:${ref}:${[...allowedExts].sort().join(",") || "*"}`;
+  const beforeFetchHead = await git(repoPath, ["rev-parse", "--verify", ref], true);
+
+  await git(repoPath, ["fetch", "--prune", remote, branch]);
+
+  const head = await gitRequired(repoPath, ["rev-parse", "--verify", ref]);
+  const storedHead = asString(args.base) ?? getState(db, stateKey);
+  let base = storedHead || beforeFetchHead || head;
+  if (!await git(repoPath, ["rev-parse", "--verify", base], true)) base = head;
+
+  if (base === head) {
+    setState(db, stateKey, head);
+    console.log(JSON.stringify({ repo, repoPath, ref, base, head, changedFiles: 0, inserted: 0, updated: 0, unchanged: 0, skipped: 0, checkpoint: head }, null, 2));
+    return;
+  }
+
+  const files = await changedFiles(repoPath, base, head);
   let inserted = 0;
   let updated = 0;
   let unchanged = 0;
   let skipped = 0;
-  let checkpoint = since;
 
-  for (const item of commits) {
-    const details = await commitDetails(repo, item.sha);
-    const at = commitDate(details);
-    if (at > checkpoint) checkpoint = at;
-    for (const file of details.files ?? []) {
-      const path = file.filename;
-      if (!pathAllowed(path, allowedExts) || file.status === "removed") {
-        skipped++;
-        continue;
-      }
-      seenFiles++;
-      const blobSha = file.sha ?? await currentBlobSha(repo, path, ref);
-      if (!blobSha) {
-        skipped++;
-        continue;
-      }
-      const result = enqueueFile(db, { repo, path, blobSha, commitSha: details.sha, commitAt: at });
-      if (result === "inserted") inserted++;
-      else if (result === "updated") updated++;
-      else unchanged++;
+  for (const file of files) {
+    if (!pathAllowed(file.path, allowedExts)) {
+      skipped++;
+      continue;
     }
+    const sha = await blobSha(repoPath, head, file.path);
+    if (!sha) {
+      skipped++;
+      continue;
+    }
+    const last = await fileLastCommit(repoPath, head, file.path);
+    const result = enqueueFile(db, { repo, path: file.path, blobSha: sha, commitSha: last.sha, commitAt: last.at });
+    if (result === "inserted") inserted++;
+    else if (result === "updated") updated++;
+    else unchanged++;
   }
 
-  return { repo, since, commits: commits.length, seenFiles, inserted, updated, unchanged, skipped, checkpoint };
-}
-
-async function sync(args: Args): Promise<void> {
-  const repos = repoList(args);
-  if (!repos.length) throw new Error("sync requires at least one --repo owner/name");
-  const allowedExts = onlyExts(args);
-  const db = openDb(args);
-  const ref = asString(args.ref, "HEAD")!;
-  const lookbackMs = parseDurationMs(asString(args.lookback, DEFAULT_LOOKBACK), parseDurationMs(DEFAULT_LOOKBACK, 24 * 60 * 60 * 1000));
-  const summaries = [];
-  for (const repo of repos) {
-    const stateKey = `lastCommitAt:${repo}:${[...allowedExts].sort().join(",") || "*"}`;
-    const stored = getState(db, stateKey);
-    const since = asString(args.since) ?? (stored ? toIso(new Date(new Date(stored).getTime() - SAFETY_WINDOW_MS)) : toIso(new Date(Date.now() - lookbackMs)));
-    const summary = await syncRepo(db, repo, allowedExts, since, ref);
-    if (!asString(args.since)) setState(db, stateKey, summary.checkpoint);
-    summaries.push(summary);
-  }
-  console.log(JSON.stringify({ summaries }, null, 2));
+  setState(db, stateKey, head);
+  console.log(JSON.stringify({ repo, repoPath, ref, base, head, changedFiles: files.length, inserted, updated, unchanged, skipped, checkpoint: head }, null, 2));
 }
 
 async function watch(args: Args): Promise<void> {
@@ -318,7 +344,7 @@ async function watch(args: Args): Promise<void> {
   let stopping = false;
   process.on("SIGINT", () => { stopping = true; });
   process.on("SIGTERM", () => { stopping = true; });
-  console.log(JSON.stringify({ watching: true, intervalMs, repos: repoList(args), only: [...onlyExts(args)], db: asString(args.db, DEFAULT_DB) }));
+  console.log(JSON.stringify({ watching: true, intervalMs, repoPath: resolve(asString(args["repo-path"], ".")!), repo: asString(args.repo) ?? null, only: [...onlyExts(args)], db: asString(args.db, DEFAULT_DB) }));
   while (!stopping) {
     try {
       await sync(args);
@@ -395,7 +421,7 @@ function ack(args: Args): void {
   const item = db.prepare(`SELECT id, repo, path, dirty FROM files WHERE ${where} AND status='delivered'`).get(...params) as { id: number; repo: string; path: string; dirty: number } | undefined;
   if (!item) throw new Error("No delivered file found for ack");
   if (item.dirty) {
-    db.prepare(`UPDATE files SET status='pending', dirty=0, delivered_at=NULL, lease_until=NULL, worker_id=NULL, updated_at=? WHERE id=?`).run(ts, item.id);
+    db.prepare("UPDATE files SET status='pending', dirty=0, delivered_at=NULL, lease_until=NULL, worker_id=NULL, updated_at=? WHERE id=?").run(ts, item.id);
     console.log(JSON.stringify({ repo: item.repo, path: item.path, status: "pending", dirtyWasSet: true }));
     return;
   }
@@ -432,7 +458,7 @@ function fail(args: Args): void {
   if (!item) throw new Error("No delivered file found for fail");
   const dirtyWasSet = item.dirty === 1;
   const status = dirtyWasSet || item.attempts < maxAttempts ? "pending" : "failed";
-  db.prepare(`UPDATE files SET status=?, dirty=0, delivered_at=NULL, lease_until=NULL, worker_id=NULL, last_error=?, updated_at=? WHERE id=?`).run(status, reason, ts, item.id);
+  db.prepare("UPDATE files SET status=?, dirty=0, delivered_at=NULL, lease_until=NULL, worker_id=NULL, last_error=?, updated_at=? WHERE id=?").run(status, reason, ts, item.id);
   console.log(JSON.stringify({ repo: item.repo, path: item.path, status, attempts: item.attempts, dirtyWasSet }));
 }
 
@@ -443,7 +469,7 @@ function stats(args: Args): void {
 }
 
 function usage(): void {
-  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  sync --repo owner/name [--only .ts,.tsx] [--since ISO] [--lookback 24h] [--db path]\n  watch --repo owner/name [--only .ts,.tsx] [--interval 60s] [--db path]\n  next [--db path] [--worker id] [--lease 90m]\n  ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]\n  fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]\n  stats [--db path]`);
+  console.log(`Usage: ghq-commits <command> [options]\n\nCommands:\n  sync --repo-path /path/to/repo [--repo owner/name] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .ts,.tsx] [--base sha] [--db path]\n  watch --repo-path /path/to/repo [--repo owner/name] [--interval 60s] [--only .ts,.tsx] [--db path]\n  next [--db path] [--worker id] [--lease 90m]\n  ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]\n  fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]\n  stats [--db path]`);
 }
 
 async function main(): Promise<void> {

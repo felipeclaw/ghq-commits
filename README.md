@@ -1,14 +1,14 @@
 # ghq-commits
 
-`ghq-commits` is a small GitHub Queue tool for tracking recently changed files from repository commits and feeding file-level review workers.
+`ghq-commits` is a small GitHub Queue tool for tracking recently changed files from a local git checkout and feeding file-level review workers.
 
 “ghq” means “GitHub queue”. This package enqueues the latest version of each changed file, deduped by `repo + path`, so workers review only the current blob instead of stale intermediate commits.
 
 ## Command summary
 
 ```text
-ghq-commits sync --repo owner/name [--only .js,.jsx,.ts,.tsx] [--since ISO] [--lookback 24h] [--db path]
-ghq-commits watch --repo owner/name [--only .js,.jsx,.ts,.tsx] [--interval 60s] [--db path]
+ghq-commits sync --repo-path /path/to/repo [--repo owner/name] [--remote origin] [--branch main] [--ref refs/remotes/origin/main] [--only .js,.jsx,.ts,.tsx] [--base sha] [--db path]
+ghq-commits watch --repo-path /path/to/repo [--repo owner/name] [--interval 60s] [--only .js,.jsx,.ts,.tsx] [--db path]
 ghq-commits next [--db path] [--worker id] [--lease 90m]
 ghq-commits ack (--id n | --repo owner/name --path file) [--issue-number n] [--issue-url url] [--severity p0]
 ghq-commits fail (--id n | --repo owner/name --path file) [--reason text] [--max-attempts 5]
@@ -21,7 +21,7 @@ ghq-commits stats [--db path]
 
 1. Run `sync` periodically or run one long-lived watcher:
    ```bash
-   ghq-commits watch --repo owner/repo --only .js,.jsx,.ts,.tsx --db /var/lib/ghq-commits/queue.db --interval 60s
+   ghq-commits watch --repo-path /srv/repos/rwa-x --repo nfinita/rwa-x --only .js,.jsx,.ts,.tsx --db /var/lib/ghq-commits/queue.db --interval 60s
    ```
 2. Each review worker leases one file:
    ```bash
@@ -45,7 +45,20 @@ A leased file remains `delivered` until `ack`, `fail`, or lease expiry.
 
 ## How it works
 
-- `sync` polls recent commits for explicitly selected repositories.
+- `sync` uses local git only; no REST API calls are part of this flow.
+- Each sync captures the current local `refs/remotes/origin/main`, runs `git fetch --prune origin main`, then compares the previous checkpoint to the new head.
+- Changed files come from:
+  ```bash
+  git diff --name-status -z --diff-filter=ACMR -M <base>..refs/remotes/origin/main
+  ```
+- Current file blob hashes come from:
+  ```bash
+  git rev-parse refs/remotes/origin/main:path/to/file
+  ```
+- Per-file latest commit metadata comes from:
+  ```bash
+  git log -1 --format=%H%x00%cI refs/remotes/origin/main -- path/to/file
+  ```
 - `--only` filters changed files by extension before queue insertion.
 - Generated/heavy paths like `.git`, `node_modules`, `dist`, `build`, `coverage`, `.next`, `.turbo`, and `.cache` are skipped.
 - Queue rows are keyed by `(repo, path)`.
@@ -54,6 +67,12 @@ A leased file remains `delivered` until `ack`, `fail`, or lease expiry.
 - If a delivered file changes blob while leased, it stays delivered with `dirty = true`; `ack` returns it to `pending` so the latest blob gets reviewed.
 - `next` atomically leases one pending file ordered by `created_at ASC, id ASC`.
 - Expired leases can be picked up again by `next`.
+
+## First run behavior
+
+If no checkpoint exists, `sync` uses the local remote-tracking ref from before fetch as the base. That means a fresh daemon starts by queueing files changed since the local checkout last fetched. If there is no prior ref, it initializes the checkpoint to the fetched head and queues nothing.
+
+To backfill intentionally, pass `--base <sha>`.
 
 ## Payloads
 
@@ -92,7 +111,8 @@ npm link   # optional, exposes ghq-commits locally
 Requirements:
 
 - Node 20+
-- `gh` CLI authenticated for repo commit/content reads
+- `git`
+- a local checkout with a configured remote
 
 ## Development
 
