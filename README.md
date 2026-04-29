@@ -21,7 +21,7 @@ ghq-commits stats [--db path]
 
 1. Run `sync` periodically or run one long-lived watcher:
    ```bash
-   ghq-commits watch --repo-path /srv/repos/rwa-x --repo nfinita/rwa-x --only .js,.jsx,.ts,.tsx --db /var/lib/ghq-commits/queue.db --interval 60s
+   ghq-commits watch --repo-path /srv/repos/project --repo owner/repo --only .js,.jsx,.ts,.tsx --db /var/lib/ghq-commits/queue.db --interval 60s
    ```
 2. Each review worker leases one file:
    ```bash
